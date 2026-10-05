@@ -7,27 +7,11 @@
 
 #include <print>
 #include <format>
+#include <stdexcept>
 
 namespace lifter {
 
 using namespace llvm;
-
-namespace handlers {
-
-auto HandleMov(Semantics& sem) -> std::vector<Successor> {
-    auto value = sem.opRead(1);
-    sem.opWrite(0, value);
-    return {};
-}
-
-auto HelperBinaryOP(Semantics& sem) -> std::vector<Successor> {
-    auto lhs = sem.opRead(1);
-    auto rhs = sem.opRead(0);
-    sem.
-    return {};
-}
-
-} // namespace handlers
 
 Semantics::Semantics(Module& mod) : m_Module(mod), m_Context(mod.getContext()), m_Builder(m_Context) {
     createTypes();
@@ -126,7 +110,7 @@ auto Semantics::regWrite(Register &reg, Value* value) -> void {
     m_Builder.CreateAlignedStore(value, pointer, Align(8));
 }
 
-auto Semantics::opRead(unsigned index) -> llvm::Value* {
+auto Semantics::opRead(unsigned index) -> Value* {
     auto op = m_Insn->detail->x86.operands[index];
 
     switch (op.type) {
@@ -136,7 +120,7 @@ auto Semantics::opRead(unsigned index) -> llvm::Value* {
 
 	case X86_OP_IMM: {
         auto ty = IntegerType::get(m_Context, op.size * 8);
-        return llvm::ConstantInt::get(ty, op.imm);
+        return ConstantInt::get(ty, op.imm);
     } break;
 
 	case X86_OP_MEM: {
@@ -171,19 +155,19 @@ auto Semantics::opWrite(unsigned index, Value *value) -> void {
     }
 }
 
-auto Semantics::memRead(uintptr_t addr, llvm::Type *ty) -> llvm::Value* {
+auto Semantics::memRead(uintptr_t addr, Type *ty) -> Value* {
     Value *mem = m_Function->getArg(1);
-    Value *ptr = m_Builder.CreateGEP(_i8Ty, mem, { llvm::ConstantInt::get(_i64Ty, addr) });
+    Value *ptr = m_Builder.CreateGEP(_i8Ty, mem, { ConstantInt::get(_i64Ty, addr) });
     return m_Builder.CreateLoad(ty, ptr);
 }
 
-auto Semantics::memWrite(uintptr_t addr, llvm::Value* value) -> void {
+auto Semantics::memWrite(uintptr_t addr, Value* value) -> void {
     Value *mem = m_Function->getArg(1);
-    Value *ptr = m_Builder.CreateGEP(_i8Ty, mem, { llvm::ConstantInt::get(_i64Ty, addr) });
+    Value *ptr = m_Builder.CreateGEP(_i8Ty, mem, { ConstantInt::get(_i64Ty, addr) });
     m_Builder.CreateStore(value, ptr);
 }
 
-auto Semantics::getOrCreateFlagPointer(Flag flag) -> llvm::Value* {
+auto Semantics::getOrCreateFlagPointer(Flag flag) -> Value* {
     if (m_FlagPtrs.contains(flag)) {
         return m_FlagPtrs[flag];
     }
@@ -194,13 +178,13 @@ auto Semantics::getOrCreateFlagPointer(Flag flag) -> llvm::Value* {
 }
 
 
-auto Semantics::flagRead(Flag flag) -> llvm::Value* {
+auto Semantics::flagRead(Flag flag) -> Value* {
     Value *ptr = getOrCreateFlagPointer(flag);
     Value *val = m_Builder.CreateLoad(m_StateTy, ptr);
-    return m_Builder.CreateICmpEQ(val, llvm::ConstantInt::get(_i8Ty, 0));
+    return m_Builder.CreateICmpEQ(val, ConstantInt::get(_i8Ty, 0));
 }
 
-auto Semantics::flagWrite(Flag flag, llvm::Value* value) -> void {
+auto Semantics::flagWrite(Flag flag, Value* value) -> void {
     Type *ty = value->getType();
     if (ty != _i8Ty) {
         assert(ty == _i1Ty && "fuck we doing bro🥀🥀🥀...");
@@ -209,6 +193,15 @@ auto Semantics::flagWrite(Flag flag, llvm::Value* value) -> void {
     Value *ptr = getOrCreateFlagPointer(flag);
     m_Builder.CreateStore(value, ptr);
 }
+
+auto Semantics::flagWriteUndef(Flag flag) -> void {
+    if (_undefFlags.contains(flag)) {
+        throw std::invalid_argument(std::format("undefined flag handler is implemented for flag {}", unsigned{flag}));
+    }
+    Function* helper = _undefFlags[flag];
+    auto value = m_Builder.CreateCall(helper, { ConstantInt::get(_i64Ty, m_Insn->address) });
+    flagWrite(flag, value);
+};
 
 auto Semantics::liftBytes(uintptr_t addr, std::span<std::uint8_t> code) -> std::vector<Successor> {
     if (!m_Function) {

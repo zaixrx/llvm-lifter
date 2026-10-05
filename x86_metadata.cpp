@@ -1,9 +1,82 @@
 #include "semantics.hpp"
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/IRBuilder.h>
 
 namespace lifter {
 
 namespace handlers {
-auto HandleMov(Semantics& sem) -> std::vector<Successor>;
+
+using namespace llvm;
+
+auto HandleMov(Semantics* sem) -> std::vector<Successor> {
+    auto value = sem->opRead(1);
+    sem->opWrite(0, value);
+    return {};
+}
+
+auto HelperUpdateFlags(Semantics* sem, Value *value) -> void {
+    auto zero_val = ConstantInt::get(sem->_i1Ty, 0);
+
+    auto resultIsZero = [&](Value *value) -> Value* {
+        return sem->m_Builder.CreateICmpEQ(value, ConstantInt::get(value->getType(), 0));
+    };
+    auto resultSignBit = [&](Value *value) -> Value* {
+        value = sem->m_Builder.CreateBinOp(Instruction::BinaryOps::LShr, value, ConstantInt::get(value->getType(), 63));
+        return sem->m_Builder.CreateICmpEQ(value, ConstantInt::get(value->getType(), 1));
+    };
+    auto resultParityEven = [&](Value *value) -> Value* {
+        Value *x, *y;
+        x = sem->m_Builder.CreateTrunc(value, sem->_i8Ty);
+        for (int i = 0; i < 2; ++i) { 
+            y = sem->m_Builder.CreateBinOp(Instruction::BinaryOps::LShr, x, ConstantInt::get(sem->_i8Ty, 1 << (2 - i)));
+            x = sem->m_Builder.CreateBinOp(Instruction::BinaryOps::Xor, x, y);
+        }
+        x = sem->m_Builder.CreateAnd(x, ConstantInt::get(sem->_i8Ty, 1));
+        return sem->m_Builder.CreateICmpEQ(x, ConstantInt::get(sem->_i8Ty, 0));
+    };
+
+    sem->flagWrite(Semantics::Flag::CF, zero_val);
+    sem->flagWrite(Semantics::Flag::PF, resultParityEven(value));
+    sem->flagWriteUndef(Semantics::Flag::AF);
+    sem->flagWrite(Semantics::Flag::ZF, resultIsZero(value));
+    sem->flagWrite(Semantics::Flag::SF, resultSignBit(value));
+    sem->flagWrite(Semantics::Flag::OF, zero_val);
+}
+
+auto HelperBinaryOP(Semantics* sem, Instruction::BinaryOps Opc) -> std::vector<Successor> {
+    auto lhs = sem->opRead(1);
+    auto rhs = sem->opRead(0);
+    auto res = sem->m_Builder.CreateBinOp(Opc, lhs, rhs);
+    sem->opWrite(0, res);
+    HelperUpdateFlags(sem, res);
+    return {};
+}
+
+auto HandleAdd(Semantics *sem) -> std::vector<Successor> {
+    return HelperBinaryOP(sem, Instruction::BinaryOps::Add);
+}
+
+auto HandleSub(Semantics *sem) -> std::vector<Successor> {
+    return HelperBinaryOP(sem, Instruction::BinaryOps::Sub);
+}
+
+auto HandleMul(Semantics *sem) -> std::vector<Successor> {
+    return HelperBinaryOP(sem, Instruction::BinaryOps::Mul);
+}
+
+auto HandleAnd(Semantics *sem) -> std::vector<Successor> {
+    return HelperBinaryOP(sem, Instruction::BinaryOps::And);
+}
+
+auto HandleOr(Semantics *sem) -> std::vector<Successor> {
+    return HelperBinaryOP(sem, Instruction::BinaryOps::Or);
+}
+
+auto HandleXor(Semantics *sem) -> std::vector<Successor> {
+    return HelperBinaryOP(sem, Instruction::BinaryOps::Xor);
+}
+
 } // namespace handlers
 
 void Semantics::initializeMetadata() {
@@ -101,6 +174,23 @@ void Semantics::initializeMetadata() {
     _semantics = {
         {X86_INS_MOV, handlers::HandleMov},
         {X86_INS_MOVABS, handlers::HandleMov},
+        {X86_INS_ADD, handlers::HandleAdd},
+        {X86_INS_SUB, handlers::HandleSub},
+        {X86_INS_MUL, handlers::HandleMul},
+        {X86_INS_AND, handlers::HandleAnd},
+        {X86_INS_OR, handlers::HandleOr},
+        {X86_INS_XOR, handlers::HandleXor},
+    };
+
+    auto def = llvm::Function::Create(
+        llvm::FunctionType::get(llvm::Type::getVoidTy(m_Context), {_i64Ty}, false),
+        llvm::Function::InternalLinkage);
+
+    llvm::IRBuilder<>(llvm::BasicBlock::Create(m_Context, "entry", def))
+        .CreateRetVoid();
+    
+    _undefFlags = {
+        { Flag::AF, def }
     };
 }
 

@@ -20,7 +20,7 @@ struct Successor {
 
 class Semantics;
 
-typedef auto (*SemanticHandler_T) (Semantics&) -> std::vector<Successor>;
+typedef auto (*SemanticHandler_T) (Semantics*) -> std::vector<Successor>;
 
 struct InsnFini {
     void operator()(cs_insn* instruction) const noexcept { cs_free(instruction, 1); }
@@ -33,16 +33,10 @@ public:
     Semantics(const Semantics&) = delete;
     Semantics& operator=(const Semantics&) = delete;
 
-    // For Users
     auto begin(uintptr_t addr) -> llvm::Function*;
     std::vector<Successor> liftBytes(uintptr_t addr, std::span<std::uint8_t> code);
 
-    // For Handlers  TODO: make handlers calss a `friend`
-    auto opRead(unsigned index) -> llvm::Value*;
-    auto opWrite(unsigned index, llvm::Value*) -> void;
-    llvm::IRBuilder<> m_Builder;
-
-private:
+// private:
     struct Register {
         std::string_view name;
         unsigned index, size, offset;
@@ -57,6 +51,8 @@ private:
 
     auto getOrCreateBlock(uintptr_t address) -> llvm::BasicBlock*;
 
+    auto opRead(unsigned index) -> llvm::Value*;
+    auto opWrite(unsigned index, llvm::Value*) -> void;
     auto getOrCreateRegPointer(Register &reg) -> llvm::Value*;
     auto regRead(Register &reg) -> llvm::Value*;
     auto regWrite(Register &reg, llvm::Value* value) -> void;
@@ -65,15 +61,18 @@ private:
     auto getOrCreateFlagPointer(Flag flag) -> llvm::Value*;
     auto flagRead(Flag flag) -> llvm::Value*;
     auto flagWrite(Flag flag, llvm::Value *value) -> void;
+    auto flagWriteUndef(Flag flag) -> void;
 
     // Global State
     llvm::Module& m_Module;
     llvm::LLVMContext& m_Context;
+    llvm::IRBuilder<> m_Builder;
     csh m_Capstone{};
 
     // Metadata
     std::map<x86_reg, Register> _regs;
     std::map<x86_insn, SemanticHandler_T> _semantics;
+    std::map<Flag, llvm::Function*> _undefFlags;
 
     // Local State
     llvm::Function* m_Function{};
