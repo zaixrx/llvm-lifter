@@ -56,8 +56,9 @@ public:
     auto getOrCreateRegPointer(Register &reg) -> llvm::Value*;
     auto regRead(Register &reg) -> llvm::Value*;
     auto regWrite(Register &reg, llvm::Value* value) -> void;
-    auto memRead(uintptr_t addr, llvm::Type*) -> llvm::Value*;
-    auto memWrite(uintptr_t addr, llvm::Value* value) -> void;
+    auto memAddress(const x86_op_mem& op) -> llvm::Value*;
+    auto memRead(llvm::Value *addr, llvm::Type*) -> llvm::Value*;
+    auto memWrite(llvm::Value *addr, llvm::Value* value) -> void;
     auto getOrCreateFlagPointer(Flag flag) -> llvm::Value*;
     auto flagRead(Flag flag) -> llvm::Value*;
     auto flagWrite(Flag flag, llvm::Value *value) -> void;

@@ -16,53 +16,41 @@ auto HandleMov(Semantics* sem) -> std::vector<Successor> {
 }
 
 auto HelperUpdateFlags(Semantics* sem, Value *value) -> void {
-    auto zero_val = ConstantInt::get(sem->_i1Ty, 0);
-
     auto resultIsZero = [&](Value *value) -> Value* {
         return sem->m_Builder.CreateICmpEQ(value, ConstantInt::get(value->getType(), 0));
     };
     auto resultSignBit = [&](Value *value) -> Value* {
-        value = sem->m_Builder.CreateBinOp(Instruction::BinaryOps::LShr, value, ConstantInt::get(value->getType(), 63));
+        const auto width = value->getType()->getIntegerBitWidth();
+        value = sem->m_Builder.CreateBinOp(Instruction::BinaryOps::LShr, value, ConstantInt::get(value->getType(), width - 1));
         return sem->m_Builder.CreateICmpEQ(value, ConstantInt::get(value->getType(), 1));
     };
     auto resultParityEven = [&](Value *value) -> Value* {
         Value *x, *y;
-        x = sem->m_Builder.CreateTrunc(value, sem->_i8Ty);
-        for (int i = 0; i < 2; ++i) { 
-            y = sem->m_Builder.CreateBinOp(Instruction::BinaryOps::LShr, x, ConstantInt::get(sem->_i8Ty, 1 << (2 - i)));
+        x = sem->m_Builder.CreateZExtOrTrunc(value, sem->_i8Ty);
+        for (unsigned shift : {4u, 2u, 1u}) {
+            y = sem->m_Builder.CreateBinOp(Instruction::BinaryOps::LShr, x, ConstantInt::get(sem->_i8Ty, shift));
             x = sem->m_Builder.CreateBinOp(Instruction::BinaryOps::Xor, x, y);
         }
         x = sem->m_Builder.CreateAnd(x, ConstantInt::get(sem->_i8Ty, 1));
         return sem->m_Builder.CreateICmpEQ(x, ConstantInt::get(sem->_i8Ty, 0));
     };
 
-    sem->flagWrite(Semantics::Flag::CF, zero_val);
     sem->flagWrite(Semantics::Flag::PF, resultParityEven(value));
-    sem->flagWriteUndef(Semantics::Flag::AF);
     sem->flagWrite(Semantics::Flag::ZF, resultIsZero(value));
     sem->flagWrite(Semantics::Flag::SF, resultSignBit(value));
-    sem->flagWrite(Semantics::Flag::OF, zero_val);
 }
 
 auto HelperBinaryOP(Semantics* sem, Instruction::BinaryOps Opc) -> std::vector<Successor> {
-    auto lhs = sem->opRead(1);
-    auto rhs = sem->opRead(0);
+    auto lhs = sem->opRead(0);
+    auto rhs = sem->m_Builder.CreateZExtOrTrunc(sem->opRead(1), lhs->getType());
     auto res = sem->m_Builder.CreateBinOp(Opc, lhs, rhs);
     sem->opWrite(0, res);
     HelperUpdateFlags(sem, res);
+    auto& ir = sem->m_Builder;
+    sem->flagWrite(Semantics::CF, ir.getInt1(false));
+    sem->flagWrite(Semantics::OF, ir.getInt1(false));
+    sem->flagWriteUndef(Semantics::AF);
     return {};
-}
-
-auto HandleAdd(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::Add);
-}
-
-auto HandleSub(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::Sub);
-}
-
-auto HandleMul(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::Mul);
 }
 
 auto HandleAnd(Semantics *sem) -> std::vector<Successor> {
@@ -169,29 +157,29 @@ void Semantics::initializeMetadata() {
         {X86_REG_RIP, {"rip", 16, 64, 0}},
         {X86_REG_EIP, {"eip", 16, 32, 0}},
         {X86_REG_IP, {"ip", 16, 16, 0}},
+
+        {X86_REG_GS, {"gs", 0, 64, 0}},
     };
 
     _semantics = {
         {X86_INS_MOV, handlers::HandleMov},
         {X86_INS_MOVABS, handlers::HandleMov},
-        {X86_INS_ADD, handlers::HandleAdd},
-        {X86_INS_SUB, handlers::HandleSub},
-        {X86_INS_MUL, handlers::HandleMul},
         {X86_INS_AND, handlers::HandleAnd},
         {X86_INS_OR, handlers::HandleOr},
         {X86_INS_XOR, handlers::HandleXor},
     };
 
-    auto def = llvm::Function::Create(
-        llvm::FunctionType::get(llvm::Type::getVoidTy(m_Context), {_i64Ty}, false),
-        llvm::Function::InternalLinkage);
-
-    llvm::IRBuilder<>(llvm::BasicBlock::Create(m_Context, "entry", def))
-        .CreateRetVoid();
-    
-    _undefFlags = {
-        { Flag::AF, def }
-    };
+    // TODO: generalize this **later**
+    const char* name = "__lifter_undef_af";
+    auto* helper = m_Module.getFunction(name);
+    auto* type = llvm::FunctionType::get(_i1Ty, {_i64Ty}, false);
+    if (helper && helper->getFunctionType() != type) {
+        throw std::invalid_argument("Undefined flag helper has incompatible type");
+    }
+    if (!helper) {
+        helper = llvm::Function::Create(type, llvm::Function::ExternalLinkage, name, m_Module);
+    }
+    _undefFlags.emplace(AF, helper);
 }
 
 } // namespace lifter

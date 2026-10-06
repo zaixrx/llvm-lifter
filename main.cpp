@@ -11,7 +11,7 @@
 
 int main() {
     try {
-        std::array<uint8_t, 0x7A> code{};
+        std::array<uint8_t, 0x73> code{};
         std::ifstream file("example.o", std::ios::binary);
         if (!file) {
             throw std::runtime_error("Failed to open example.o");

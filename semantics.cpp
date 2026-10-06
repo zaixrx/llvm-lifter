@@ -67,12 +67,12 @@ auto Semantics::getOrCreateBlock(std::uintptr_t addr) -> BasicBlock* {
 }
 
 auto Semantics::getOrCreateRegPointer(Register &reg) -> Value* {
-    if (!m_RegPtrs.contains(reg.index)) {
+    if (m_RegPtrs.contains(reg.index)) {
         return m_RegPtrs[reg.index];
     }
     IRBuilder<> temp(m_Function->getEntryBlock().getTerminator());
     Value* pointer = temp.CreateStructGEP(m_StateTy, m_Function->getArg(0), reg.index, reg.name);
-    m_RegPtrs.emplace(reg.index, pointer);
+    m_RegPtrs[reg.index] = pointer;
     return pointer;
 }
 
@@ -90,14 +90,11 @@ auto Semantics::regRead(Register &reg) -> Value* {
 
 auto Semantics::regWrite(Register &reg, Value* value) -> void {
     Value* pointer = getOrCreateRegPointer(reg);
-
     // Make same active number of bits as `reg`
     value = m_Builder.CreateZExtOrTrunc(value, m_Builder.getIntNTy(reg.size));
-
     if (reg.size != 64) {
         // Zero extend to 64 bit register
         value = m_Builder.CreateZExt(value, _i64Ty);
-
         if (reg.size != 32) {
             Value* old = m_Builder.CreateAlignedLoad(_i64Ty, pointer, Align(8));
             const uint64_t inv_mask = ~(((uint64_t{1} << reg.size) - 1) << reg.offset);
@@ -106,7 +103,6 @@ auto Semantics::regWrite(Register &reg, Value* value) -> void {
             value = m_Builder.CreateOr(old, value);
         }
     }
-
     m_Builder.CreateAlignedStore(value, pointer, Align(8));
 }
 
@@ -124,8 +120,7 @@ auto Semantics::opRead(unsigned index) -> Value* {
     } break;
 
 	case X86_OP_MEM: {
-        uintptr_t addr = op.mem.base + (op.mem.index * op.mem.scale) + op.mem.disp; // TODO: wtf
-        return memRead(addr, IntegerType::get(m_Context, op.size * 8));
+        return memRead(memAddress(op.mem), IntegerType::get(m_Context, op.size * 8));
     } break;
 
     default:
@@ -146,8 +141,8 @@ auto Semantics::opWrite(unsigned index, Value *value) -> void {
     } break;
 
 	case X86_OP_MEM: {
-        uintptr_t addr = op.mem.base + (op.mem.index * op.mem.scale) + op.mem.disp; // TODO: wtf
-        memWrite(addr, value);
+        value = m_Builder.CreateZExtOrTrunc(value, m_Builder.getIntNTy(op.size * 8));
+        memWrite(memAddress(op.mem), value);
     } break;
 
     default:
@@ -155,16 +150,52 @@ auto Semantics::opWrite(unsigned index, Value *value) -> void {
     }
 }
 
-auto Semantics::memRead(uintptr_t addr, Type *ty) -> Value* {
-    Value *mem = m_Function->getArg(1);
-    Value *ptr = m_Builder.CreateGEP(_i8Ty, mem, { ConstantInt::get(_i64Ty, addr) });
-    return m_Builder.CreateLoad(ty, ptr);
+auto Semantics::memAddress(const x86_op_mem& mem) -> Value* {
+    Value* addr = nullptr;
+    Type* addrTy = IntegerType::getIntNTy(m_Context, m_Insn->detail->x86.addr_size * 8);
+
+    if (mem.index != X86_REG_INVALID) {
+        auto* index = m_Builder.CreateZExtOrTrunc(regRead(_regs.at(mem.index)), addrTy);
+        addr = m_Builder.CreateMul(index, ConstantInt::get(addrTy, mem.scale));
+    }
+    
+    if (mem.base != X86_REG_INVALID) {
+        Value *baseValue = nullptr;
+        if (mem.base == X86_REG_RIP || mem.base == X86_REG_EIP) {
+            baseValue = ConstantInt::get(addrTy, m_Insn->address + m_Insn->size);
+        } else {
+            baseValue = m_Builder.CreateZExtOrTrunc(regRead(_regs.at(mem.base)), addrTy);
+        }
+        addr = addr ? m_Builder.CreateAdd(addr, baseValue) : baseValue;
+    }
+
+    if (mem.disp != 0) {
+        Value *dispValue = ConstantInt::get(addrTy, mem.disp);
+        addr = addr ? m_Builder.CreateAdd(addr, dispValue) : dispValue;
+    }
+
+    if (addr->getType() != _i64Ty) {
+        addr = m_Builder.CreateZExt(addr, _i64Ty);
+    }
+
+    if (mem.segment == X86_REG_GS) {
+        Value *base = regRead(_regs.at(mem.segment));
+        addr = m_Builder.CreateAdd(addr, base);
+    }
+
+    return addr;
 }
 
-auto Semantics::memWrite(uintptr_t addr, Value* value) -> void {
+auto Semantics::memRead(Value *addr, Type *ty) -> Value* {
     Value *mem = m_Function->getArg(1);
-    Value *ptr = m_Builder.CreateGEP(_i8Ty, mem, { ConstantInt::get(_i64Ty, addr) });
-    m_Builder.CreateStore(value, ptr);
+    Value *ptr = m_Builder.CreateGEP(_i8Ty, mem, {addr});
+    return m_Builder.CreateAlignedLoad(ty, ptr, Align(1));
+}
+
+auto Semantics::memWrite(Value *addr, Value* value) -> void {
+    Value *mem = m_Function->getArg(1);
+    Value *ptr = m_Builder.CreateGEP(_i8Ty, mem, {addr});
+    m_Builder.CreateAlignedStore(value, ptr, Align(1));
 }
 
 auto Semantics::getOrCreateFlagPointer(Flag flag) -> Value* {
@@ -172,16 +203,17 @@ auto Semantics::getOrCreateFlagPointer(Flag flag) -> Value* {
         return m_FlagPtrs[flag];
     }
     IRBuilder<> temp(m_Function->getEntryBlock().getTerminator());
-    Value* pointer = temp.CreateStructGEP(m_StateTy, m_Function->getArg(0), 17 + flag, std::format("eflags_{}", unsigned{flag}));
-    m_RegPtrs.emplace(flag, pointer);
+    static constexpr unsigned indices[] = {0, 1, 2, 3, 4, 8};
+    Value* flags = temp.CreateStructGEP(m_StateTy, m_Function->getArg(0), 17);
+    Value* pointer = temp.CreateStructGEP(m_StateTy->getElementType(17), flags, indices[flag], std::format("eflags_{}", unsigned{flag}));
+    m_FlagPtrs.emplace(flag, pointer);
     return pointer;
 }
 
-
 auto Semantics::flagRead(Flag flag) -> Value* {
     Value *ptr = getOrCreateFlagPointer(flag);
-    Value *val = m_Builder.CreateLoad(m_StateTy, ptr);
-    return m_Builder.CreateICmpEQ(val, ConstantInt::get(_i8Ty, 0));
+    Value *val = m_Builder.CreateAlignedLoad(_i8Ty, ptr, Align(1));
+    return m_Builder.CreateICmpNE(val, ConstantInt::get(_i8Ty, 0));
 }
 
 auto Semantics::flagWrite(Flag flag, Value* value) -> void {
@@ -195,8 +227,8 @@ auto Semantics::flagWrite(Flag flag, Value* value) -> void {
 }
 
 auto Semantics::flagWriteUndef(Flag flag) -> void {
-    if (_undefFlags.contains(flag)) {
-        throw std::invalid_argument(std::format("undefined flag handler is implemented for flag {}", unsigned{flag}));
+    if (!_undefFlags.contains(flag)) {
+        throw std::invalid_argument(std::format("undefined flag handler is not implemented for flag {}", unsigned{flag}));
     }
     Function* helper = _undefFlags[flag];
     auto value = m_Builder.CreateCall(helper, { ConstantInt::get(_i64Ty, m_Insn->address) });
@@ -214,7 +246,7 @@ auto Semantics::liftBytes(uintptr_t addr, std::span<std::uint8_t> code) -> std::
             throw std::invalid_argument("Failed to decode instruction at: " + std::format("0x{:x}", addr));
         }
         if (true) {
-            std::println("0x{:X}:\t{}\t\t{}\n", insn[0].address, insn[0].mnemonic, insn[0].op_str);
+            std::println(stderr, "0x{:X}:\t{}\t\t{}", insn[0].address, insn[0].mnemonic, insn[0].op_str);
         }
         std::unique_ptr<cs_insn, InsnFini> owned(insn);
         return owned;
@@ -232,25 +264,13 @@ auto Semantics::liftBytes(uintptr_t addr, std::span<std::uint8_t> code) -> std::
         throw std::invalid_argument(std::format("Unsupported instruction, got: {}", insn->mnemonic));
     }
 
-    /* TODO
-    for (unsigned i = 0; i < insn->detail->x86.op_count; ++i) {
-        const auto& op = insn->detail->x86.operands[i];
-        if (op.type == X86_OP_REG && !_regs.contains(op.reg)) {
-            throw std::invalid_argument(std::format("Unsupported register, got: {}", static_cast<unsigned>(op.reg)));
-        }
-    }
-    */
-
     m_Insn = std::move(insn);
     std::vector<Successor> succs = _semantics[id](this);
-
     if (!succs.size()) {
         uint64_t fallthrough = addr + m_Insn->size;
         Value *fallthrough_Value = m_Builder.getInt64(fallthrough);
-
         BasicBlock* next = getOrCreateBlock(fallthrough);
         m_Builder.CreateBr(next);
-
         succs.push_back({ addr, fallthrough_Value });
     }
 
@@ -280,20 +300,13 @@ void Semantics::createTypes() {
         return StructType::create(context, fields, name);
     };
 
-    std::vector<Type*> flag_fields(17, _i8Ty);
+    std::vector<Type*> fields(18, _i64Ty); // 17 GPRs + GS
+    std::vector<Type*> flag_fields(6, _i8Ty); // TODO: merge those as registers
     auto* flags = namedStruct(m_Context, "Flags", flag_fields);
-    auto* segment = namedStruct(m_Context, "Segment", {_i64Ty, _i32Ty, _i16Ty, _i16Ty});
-    auto* x87 = namedStruct(
-        m_Context, "X87", { ArrayType::get(ArrayType::get(_i8Ty, 10), 8), _i16Ty, _i16Ty, _i16Ty, _i16Ty, _i64Ty, _i64Ty}
-    );
-
-    std::vector<Type*> fields(17, _i64Ty); // 17 GPRs
     fields.insert(
         fields.end(),
         {
-            flags, ArrayType::get(segment, 6), x87,
-            ArrayType::get(ArrayType::get(_i8Ty, 64), 32),
-            ArrayType::get(_i64Ty, 8), _i32Ty, _i32Ty
+            flags
         }
     );
     m_StateTy = namedStruct(m_Context, "State", fields);
