@@ -11,13 +11,13 @@
 
 int main() {
     try {
-        std::array<uint8_t, 0x73> code{};
+        std::array<uint8_t, 0x9f> code{};
         std::ifstream file("example.o", std::ios::binary);
         if (!file) {
             throw std::runtime_error("Failed to open example.o");
         }
-        if (!file.seekg(0x200, std::ios::beg)) {
-            throw std::runtime_error("Failed to seek to offset 0x200 in example.o");
+        if (!file.seekg(0x180, std::ios::beg)) {
+            throw std::runtime_error("Failed to seek to offset 0x180 in example.o");
         }
         if (!file.read(reinterpret_cast<char*>(code.data()), code.size())) {
             throw std::runtime_error("Failed to read example.o");
@@ -26,7 +26,7 @@ int main() {
         llvm::LLVMContext context;
         llvm::Module _module("x86_mov_example", context);
 
-        const llvm::Triple target(_module.getTargetTriple()); // TODO: move to caller
+        const llvm::Triple target(_module.getTargetTriple());
         _module.setTargetTriple(llvm::Triple("x86_64-pc-linux-gnu"));
         _module.setDataLayout("e-p:64:64-i64:64-i128:128-n8:16:32:64-S128");
 

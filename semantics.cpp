@@ -13,7 +13,7 @@ namespace lifter {
 
 using namespace llvm;
 
-Semantics::Semantics(Module& mod) : m_Module(mod), m_Context(mod.getContext()), m_Builder(m_Context) {
+Semantics::Semantics(Module& mod) : m_Module(mod), m_Context(mod.getContext()), m_Builder(m_Context), _x86(this) {
     createTypes();
     initializeMetadata();
 
@@ -174,6 +174,11 @@ auto Semantics::memAddress(const x86_op_mem& mem) -> Value* {
         addr = addr ? m_Builder.CreateAdd(addr, dispValue) : dispValue;
     }
 
+    // to not dereference nullptr, e.g [0]
+    if (!addr) {
+        addr = ConstantInt::get(addrTy, 0);
+    }
+
     if (addr->getType() != _i64Ty) {
         addr = m_Builder.CreateZExt(addr, _i64Ty);
     }
@@ -198,25 +203,24 @@ auto Semantics::memWrite(Value *addr, Value* value) -> void {
     m_Builder.CreateAlignedStore(value, ptr, Align(1));
 }
 
-auto Semantics::getOrCreateFlagPointer(Flag flag) -> Value* {
+auto Semantics::getOrCreateFlagPointer(Semantics_x86::Flag flag) -> Value* {
     if (m_FlagPtrs.contains(flag)) {
         return m_FlagPtrs[flag];
     }
     IRBuilder<> temp(m_Function->getEntryBlock().getTerminator());
-    static constexpr unsigned indices[] = {0, 1, 2, 3, 4, 8};
-    Value* flags = temp.CreateStructGEP(m_StateTy, m_Function->getArg(0), 17);
-    Value* pointer = temp.CreateStructGEP(m_StateTy->getElementType(17), flags, indices[flag], std::format("eflags_{}", unsigned{flag}));
+    Value* flags = temp.CreateStructGEP(m_StateTy, m_Function->getArg(0), 18);
+    Value* pointer = temp.CreateStructGEP(m_StateTy->getElementType(18), flags, unsigned{flag}, std::format("eflags_{}", unsigned{flag}));
     m_FlagPtrs.emplace(flag, pointer);
     return pointer;
 }
 
-auto Semantics::flagRead(Flag flag) -> Value* {
+auto Semantics::flagRead(Semantics_x86::Flag flag) -> Value* {
     Value *ptr = getOrCreateFlagPointer(flag);
     Value *val = m_Builder.CreateAlignedLoad(_i8Ty, ptr, Align(1));
     return m_Builder.CreateICmpNE(val, ConstantInt::get(_i8Ty, 0));
 }
 
-auto Semantics::flagWrite(Flag flag, Value* value) -> void {
+auto Semantics::flagWrite(Semantics_x86::Flag flag, Value* value) -> void {
     Type *ty = value->getType();
     if (ty != _i8Ty) {
         assert(ty == _i1Ty && "fuck we doing bro🥀🥀🥀...");
@@ -226,14 +230,29 @@ auto Semantics::flagWrite(Flag flag, Value* value) -> void {
     m_Builder.CreateStore(value, ptr);
 }
 
-auto Semantics::flagWriteUndef(Flag flag) -> void {
-    if (!_undefFlags.contains(flag)) {
+auto Semantics::flagWriteUndef(Semantics_x86::Flag flag) -> void {
+    if (!_x86._undefFlags.contains(flag)) {
         throw std::invalid_argument(std::format("undefined flag handler is not implemented for flag {}", unsigned{flag}));
     }
-    Function* helper = _undefFlags[flag];
+    Function* helper = _x86._undefFlags.at(flag);
     auto value = m_Builder.CreateCall(helper, { ConstantInt::get(_i64Ty, m_Insn->address) });
     flagWrite(flag, value);
-};
+}
+
+auto Semantics::push(Value* value) -> void {
+    auto& rsp = _regs.at(X86_REG_RSP);
+    auto* addr = m_Builder.CreateSub(regRead(rsp), m_Builder.getInt64(8));
+    regWrite(rsp, addr);
+    memWrite(addr, m_Builder.CreateZExtOrTrunc(value, _i64Ty));
+}
+
+auto Semantics::pop() -> Value* {
+    auto& rsp = _regs.at(X86_REG_RSP);
+    auto* addr = regRead(rsp);
+    auto* value = memRead(addr, _i64Ty);
+    regWrite(rsp, m_Builder.CreateAdd(addr, m_Builder.getInt64(8)));
+    return value;
+}
 
 auto Semantics::liftBytes(uintptr_t addr, std::span<std::uint8_t> code) -> std::vector<Successor> {
     if (!m_Function) {
@@ -245,7 +264,7 @@ auto Semantics::liftBytes(uintptr_t addr, std::span<std::uint8_t> code) -> std::
         if (cs_disasm(m_Capstone, code.data(), code.size(), addr, 1, &insn) != 1) {
             throw std::invalid_argument("Failed to decode instruction at: " + std::format("0x{:x}", addr));
         }
-        if (true) {
+        if (false) {
             std::println(stderr, "0x{:X}:\t{}\t\t{}", insn[0].address, insn[0].mnemonic, insn[0].op_str);
         }
         std::unique_ptr<cs_insn, InsnFini> owned(insn);
@@ -265,7 +284,7 @@ auto Semantics::liftBytes(uintptr_t addr, std::span<std::uint8_t> code) -> std::
     }
 
     m_Insn = std::move(insn);
-    std::vector<Successor> succs = _semantics[id](this);
+    std::vector<Successor> succs = (_x86.*_semantics.at(id))(this);
     if (!succs.size()) {
         uint64_t fallthrough = addr + m_Insn->size;
         Value *fallthrough_Value = m_Builder.getInt64(fallthrough);
@@ -301,7 +320,7 @@ void Semantics::createTypes() {
     };
 
     std::vector<Type*> fields(18, _i64Ty); // 17 GPRs + GS
-    std::vector<Type*> flag_fields(6, _i8Ty); // TODO: merge those as registers
+    std::vector<Type*> flag_fields(6, _i8Ty);
     auto* flags = namedStruct(m_Context, "Flags", flag_fields);
     fields.insert(
         fields.end(),

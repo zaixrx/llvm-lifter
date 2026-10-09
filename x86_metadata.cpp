@@ -1,21 +1,48 @@
 #include "semantics.hpp"
-#include <llvm/IR/BasicBlock.h>
+
+#include <format>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/Support/Casting.h>
+#include <llvm/Support/CodeGen.h>
 
 namespace lifter {
 
-namespace handlers {
-
 using namespace llvm;
 
-auto HandleMov(Semantics* sem) -> std::vector<Successor> {
+// The module/context exist, but Semantics::createTypes() has not run yet.
+Semantics_x86::Semantics_x86(Semantics *sem) {
+    auto* i64 = Type::getInt64Ty(sem->m_Context);
+    auto* i1 = Type::getInt1Ty(sem->m_Context);
+
+    auto createFunc = [&sem](const char *name, llvm::Type *result, llvm::ArrayRef<llvm::Type*> params) -> llvm::Function* {
+        auto* func = sem->m_Module.getFunction(name);
+        auto* type = llvm::FunctionType::get(result, params, false);
+        if (func && func->getFunctionType() != type) {
+            throw std::invalid_argument(std::format("module defined {} has incompatible type", name));
+        }
+        if (!func) {
+            func = llvm::Function::Create(type, llvm::Function::ExternalLinkage, name, sem->m_Module);
+        }
+        return func;
+    };
+
+    jumpHandler = createFunc("__lifter_jmp_handler", Type::getVoidTy(sem->m_Context), {i64});
+    callHandler = createFunc("__lifter_call_handler", Type::getVoidTy(sem->m_Context), {i64});
+    retHandler = createFunc("__lifter_ret_handler", Type::getVoidTy(sem->m_Context), {i64});
+    _undefFlags.emplace(AF, createFunc("__lifter_undef_af", i1, {i64}));
+}
+
+// data
+auto Semantics_x86::HandleMov(Semantics* sem) -> std::vector<Successor> {
     auto value = sem->opRead(1);
     sem->opWrite(0, value);
     return {};
 }
 
-auto HelperUpdateFlags(Semantics* sem, Value *value) -> void {
+// arith
+auto Semantics_x86::HelperUpdateFlags(Semantics* sem, Value *value) -> void {
     auto resultIsZero = [&](Value *value) -> Value* {
         return sem->m_Builder.CreateICmpEQ(value, ConstantInt::get(value->getType(), 0));
     };
@@ -35,37 +62,170 @@ auto HelperUpdateFlags(Semantics* sem, Value *value) -> void {
         return sem->m_Builder.CreateICmpEQ(x, ConstantInt::get(sem->_i8Ty, 0));
     };
 
-    sem->flagWrite(Semantics::Flag::PF, resultParityEven(value));
-    sem->flagWrite(Semantics::Flag::ZF, resultIsZero(value));
-    sem->flagWrite(Semantics::Flag::SF, resultSignBit(value));
+    sem->flagWrite(Flag::PF, resultParityEven(value));
+    sem->flagWrite(Flag::ZF, resultIsZero(value));
+    sem->flagWrite(Flag::SF, resultSignBit(value));
+    sem->flagWrite(Flag::CF, sem->m_Builder.getInt1(false));
+    sem->flagWrite(Flag::OF, sem->m_Builder.getInt1(false));
+    sem->flagWriteUndef(Flag::AF);
 }
 
-auto HelperBinaryOP(Semantics* sem, Instruction::BinaryOps Opc) -> std::vector<Successor> {
+auto Semantics_x86::HelperBinaryOP(Semantics* sem, llvm::Instruction::BinaryOps Opc, void(Semantics_x86::*helper)(Semantics*, llvm::Value*)) -> std::vector<Successor> {
     auto lhs = sem->opRead(0);
     auto rhs = sem->m_Builder.CreateZExtOrTrunc(sem->opRead(1), lhs->getType());
     auto res = sem->m_Builder.CreateBinOp(Opc, lhs, rhs);
     sem->opWrite(0, res);
-    HelperUpdateFlags(sem, res);
-    auto& ir = sem->m_Builder;
-    sem->flagWrite(Semantics::CF, ir.getInt1(false));
-    sem->flagWrite(Semantics::OF, ir.getInt1(false));
-    sem->flagWriteUndef(Semantics::AF);
+    (this->*helper)(sem, res);
     return {};
 }
 
-auto HandleAnd(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::And);
+auto Semantics_x86::HandleAnd(Semantics *sem) -> std::vector<Successor> {
+    return HelperBinaryOP(sem, Instruction::BinaryOps::And, &Semantics_x86::HelperUpdateFlags);
 }
 
-auto HandleOr(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::Or);
+auto Semantics_x86::HandleOr(Semantics *sem) -> std::vector<Successor> {
+    return HelperBinaryOP(sem, Instruction::BinaryOps::Or, &Semantics_x86::HelperUpdateFlags);
 }
 
-auto HandleXor(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::Xor);
+auto Semantics_x86::HandleXor(Semantics *sem) -> std::vector<Successor> {
+    return HelperBinaryOP(sem, Instruction::BinaryOps::Xor, &Semantics_x86::HelperUpdateFlags);
 }
 
-} // namespace handlers
+auto Semantics_x86::HelperConditinalJump(Semantics *sem, Value *cond) -> std::vector<Successor> {
+    uintptr_t falseAddr = sem->m_Insn->address + sem->m_Insn->size;
+    uintptr_t trueAddr = sem->m_Insn->detail->x86.operands[0].imm;
+
+    sem->m_Builder.CreateCondBr(cond, sem->getOrCreateBlock(trueAddr), sem->getOrCreateBlock(falseAddr));
+
+    auto src = sem->m_Insn->address;
+    return { 
+        Successor(src, sem->m_Builder.getInt64(falseAddr)),
+        Successor(src, sem->m_Builder.getInt64(trueAddr)),
+    };
+}
+
+auto Semantics_x86::HelperCCCond(Semantics *sem, CCCond cc) {
+    auto cf = [&]() -> Value* {
+        return sem->flagRead(Flag::CF);
+    };
+
+    auto zf = [&]() -> Value* {
+        return sem->flagRead(Flag::ZF);
+    };
+
+    auto sf = [&]() -> Value* {
+        return sem->flagRead(Flag::SF);
+    };
+
+    auto of = [&]() -> Value* {
+        return sem->flagRead(Flag::OF);
+    };
+
+    auto pf = [&]() -> Value* {
+        return sem->flagRead(Flag::PF);
+    };
+
+    auto boolNot = [&](Value *value) -> Value* {
+        return sem->m_Builder.CreateNot(value);
+    };
+
+    auto boolNotEql = [&](Value *a, Value *b) -> Value* {
+        return sem->m_Builder.CreateXor(a, b);
+    };
+
+    switch (cc) {
+        case CCCond::Above: {
+            return boolNot(sem->m_Builder.CreateOr(cf(), zf()));
+        } break;
+        case CCCond::AboveEql: {
+            return boolNot(cf());
+        } break;
+        case CCCond::Below: {
+            return cf();
+        } break;
+        case CCCond::BelowEql: {
+            return sem->m_Builder.CreateOr(cf(), zf());
+        } break;
+        case CCCond::Greater: {
+            return boolNot(sem->m_Builder.CreateOr(zf(), boolNotEql(sf(), of())));
+        } break;
+        case CCCond::GreaterEql: {
+            return boolNot(boolNotEql(sf(), of()));
+        } break;
+        case CCCond::Less: {
+            return boolNotEql(sf(), of());
+        } break;
+        case CCCond::LessEql: {
+            return sem->m_Builder.CreateOr(zf(), boolNotEql(sf(), of()));
+        } break;
+        case CCCond::Zero: {
+            return zf();
+        } break;
+        case CCCond::NotZero: {
+            return boolNot(zf());
+        } break;
+        case CCCond::Overflow: {
+            return of();
+        } break;
+        case CCCond::NotOverflow: {
+            return boolNot(of());
+        } break;
+        case CCCond::Parity: {
+            return pf();
+        } break;
+        case CCCond::NotParity: {
+            return boolNot(pf());
+        } break;
+        case CCCond::Sign: {
+            return sf();
+        } break;
+        case CCCond::NotSign: {
+            return boolNot(sf());
+        } break;
+    }
+
+    std::unreachable();
+}
+
+auto Semantics_x86::HandleJz(Semantics *sem) -> std::vector<Successor> {
+    return HelperConditinalJump(sem, HelperCCCond(sem, CCCond::Zero));
+}
+
+// TODO: others...
+
+auto Semantics_x86::HandleJmp(Semantics *sem) -> std::vector<Successor> {
+    auto target_addr_val = sem->opRead(0);
+    if (auto target_addr_val_cte = dyn_cast<ConstantInt>(target_addr_val)) {
+        auto bb = sem->getOrCreateBlock(target_addr_val_cte->getZExtValue());
+        sem->m_Builder.CreateBr(bb);
+    } else {
+        sem->m_Builder.CreateCall(jumpHandler, { target_addr_val });
+        sem->m_Builder.CreateRetVoid();
+    }
+    return { Successor(sem->m_Insn->address, target_addr_val) };
+}
+
+auto Semantics_x86::HandleCall(Semantics *sem) -> std::vector<Successor> {
+    auto call = sem->opRead(0);
+    auto ret_addr = sem->m_Insn->address + sem->m_Insn->size;
+    auto ret_addr_val = sem->m_Builder.getInt64(ret_addr);
+    sem->push(ret_addr_val);
+    sem->m_Builder.CreateCall(callHandler, { call });
+    sem->m_Builder.CreateBr(sem->getOrCreateBlock(ret_addr));
+    return { Successor(sem->m_Insn->address, ret_addr_val) };
+}
+
+auto Semantics_x86::HandleRet(Semantics *sem) -> std::vector<Successor> {
+    auto addr_val = sem->pop();
+    if (sem->m_Insn->detail->x86.op_count != 0) {
+        auto& rsp = sem->_regs.at(X86_REG_RSP);
+        auto* extra = sem->m_Builder.getInt64(sem->m_Insn->detail->x86.operands[0].imm);
+        sem->regWrite(rsp, sem->m_Builder.CreateAdd(sem->regRead(rsp), extra));
+    }
+    sem->m_Builder.CreateCall(retHandler, { addr_val });
+    sem->m_Builder.CreateRetVoid();
+    return { Successor(sem->m_Insn->address, addr_val) };
+}
 
 void Semantics::initializeMetadata() {
     // State field index, width in bits, and bit offset within the parent register.
@@ -158,28 +318,23 @@ void Semantics::initializeMetadata() {
         {X86_REG_EIP, {"eip", 16, 32, 0}},
         {X86_REG_IP, {"ip", 16, 16, 0}},
 
-        {X86_REG_GS, {"gs", 0, 64, 0}},
+        {X86_REG_GS, {"gs", 17, 64, 0}},
     };
 
     _semantics = {
-        {X86_INS_MOV, handlers::HandleMov},
-        {X86_INS_MOVABS, handlers::HandleMov},
-        {X86_INS_AND, handlers::HandleAnd},
-        {X86_INS_OR, handlers::HandleOr},
-        {X86_INS_XOR, handlers::HandleXor},
-    };
+        {X86_INS_MOV, &Semantics_x86::HandleMov},
+        {X86_INS_MOVABS, &Semantics_x86::HandleMov},
 
-    // TODO: generalize this **later**
-    const char* name = "__lifter_undef_af";
-    auto* helper = m_Module.getFunction(name);
-    auto* type = llvm::FunctionType::get(_i1Ty, {_i64Ty}, false);
-    if (helper && helper->getFunctionType() != type) {
-        throw std::invalid_argument("Undefined flag helper has incompatible type");
-    }
-    if (!helper) {
-        helper = llvm::Function::Create(type, llvm::Function::ExternalLinkage, name, m_Module);
-    }
-    _undefFlags.emplace(AF, helper);
+        {X86_INS_AND, &Semantics_x86::HandleAnd},
+        {X86_INS_OR, &Semantics_x86::HandleOr},
+        {X86_INS_XOR, &Semantics_x86::HandleXor},
+
+        {X86_INS_JE, &Semantics_x86::HandleJz},
+
+        {X86_INS_JMP, &Semantics_x86::HandleJmp},
+        {X86_INS_CALL, &Semantics_x86::HandleCall},
+        {X86_INS_RET, &Semantics_x86::HandleRet},
+    };
 }
 
 } // namespace lifter

@@ -1,37 +1,64 @@
+; NOTE: code isn't made to run
+
+bits 64
+default abs
 section .text
 global _start
 
+; Representative lifting cases; guest memory and runtime hooks are external.
 _start:
-    mov al, 0x42
+    mov rsp, 0x20000
+    mov rsi, 0x10000
+
+    ; Full-width write, partial writes, high byte, and 32-bit zero extension.
+    mov rax, 0x8877665544332211
     mov ax, 0x1234
-    mov eax, 0x12345678
-    mov rax, 0x1122334455667788
-    mov bl, al
-    mov bx, ax
-    mov ebx, eax
+    mov ah, 0x80
+    mov eax, 0x80000000
     mov rbx, rax
-    mov r9, r8
-    mov cl, [rsi + 16]
-    mov cx, [rsi + 18]
-    mov ecx, [rsi + 20]
-    mov rcx, [rsi + 24]
 
-    mov byte [rsi], 0x42
-    mov word [rsi + 2], 0x1234
-    mov dword [rsi + 4], 0x12345678
-    mov qword [rsi + 8], -1
-    mov [rsi + 16], al
-    mov [rsi + 18], ax
-    mov [rsi + 20], eax
-    mov [rsi + 24], rax
-
+    ; Memory widths and representative effective-address forms.
+    mov byte [rsi], 1
+    mov al, [rsi]
+    mov word [rsi + 2], 3
+    mov ax, [rsi + 2]
+    mov dword [rsi + 4], -1
+    mov eax, [rsi + 4]
     mov edx, 2
-    mov [rsi + rdx*8 + 16], rax
-    mov r10, [rsi + rdx*8 + 16]
+    mov [rsi + rdx*8 - 8], rax
+    mov rbx, [rsi + rdx*8 - 8]
+    mov [rel scratch], rax
+    mov rbx, [rel scratch]
+    mov al, [gs:esi + edx*4]
+    mov al, [0]
 
-    mov [rel buffer], rax
-    mov r11, [rel buffer]
+    ; Logical handlers: widths, memory operands, zero/sign/parity results.
+    and al, 0x80
+    or ax, 3
+    xor eax, eax
+    and rbx, -1
+    or dword [rsi + 4], eax
+    xor rbx, [rsi + 8]
 
-section .bss
-align 8
-buffer: resb 64
+    ; CALL forms; the lifter delegates targets to its runtime hook.
+    call plain_return
+    call rbx
+    call [rsi + 8]
+
+    ; Both JE edges are visited; MOV preserves the flags from XOR.
+    xor eax, eax
+    je plain_return
+    mov eax, 1
+    or eax, eax
+    je adjusted_return
+    jmp indirect_jump
+
+plain_return:
+    ret
+adjusted_return:
+    ret 16
+indirect_jump:
+    jmp [rsi + 8]
+
+scratch:
+    dq 0
