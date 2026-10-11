@@ -42,7 +42,7 @@ auto Semantics_x86::HandleMov(Semantics* sem) -> std::vector<Successor> {
 }
 
 // arith
-auto Semantics_x86::HelperUpdateFlags(Semantics* sem, Value *value) -> void {
+auto Semantics_x86::HelperWriteCommonFlags(Semantics* sem, Value *value) -> void {
     auto resultIsZero = [&](Value *value) -> Value* {
         return sem->m_Builder.CreateICmpEQ(value, ConstantInt::get(value->getType(), 0));
     };
@@ -79,16 +79,28 @@ auto Semantics_x86::HelperBinaryOP(Semantics* sem, llvm::Instruction::BinaryOps 
     return {};
 }
 
+auto Semantics_x86::HelperWriteSubFlags(Semantics *sem, llvm::Value *value) {
+}
+
 auto Semantics_x86::HandleAnd(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::And, &Semantics_x86::HelperUpdateFlags);
+    return HelperBinaryOP(sem, Instruction::BinaryOps::And, &Semantics_x86::HelperWriteCommonFlags);
 }
 
 auto Semantics_x86::HandleOr(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::Or, &Semantics_x86::HelperUpdateFlags);
+    return HelperBinaryOP(sem, Instruction::BinaryOps::Or, &Semantics_x86::HelperWriteCommonFlags);
 }
 
 auto Semantics_x86::HandleXor(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::Xor, &Semantics_x86::HelperUpdateFlags);
+    return HelperBinaryOP(sem, Instruction::BinaryOps::Xor, &Semantics_x86::HelperWriteCommonFlags);
+}
+
+auto Semantics_x86::HandleCmp(Semantics *sem) -> std::vector<Successor> {
+    auto dst = sem->opRead(0);
+    auto src = sem->opRead(1);
+    src = sem->m_Builder.CreateZExtOrTrunc(src, dst->getType());
+    auto res = sem->m_Builder.CreateSub(dst, src);
+    HelperWriteSubFlags(sem, res);
+    return {};
 }
 
 auto Semantics_x86::HelperConditinalJump(Semantics *sem, Value *cond) -> std::vector<Successor> {
@@ -104,7 +116,7 @@ auto Semantics_x86::HelperConditinalJump(Semantics *sem, Value *cond) -> std::ve
     };
 }
 
-auto Semantics_x86::HelperCCCond(Semantics *sem, CCCond cc) {
+auto Semantics_x86::GetCCCond(Semantics *sem, CCCond cc) {
     auto cf = [&]() -> Value* {
         return sem->flagRead(Flag::CF);
     };
@@ -188,7 +200,7 @@ auto Semantics_x86::HelperCCCond(Semantics *sem, CCCond cc) {
 }
 
 auto Semantics_x86::HandleJz(Semantics *sem) -> std::vector<Successor> {
-    return HelperConditinalJump(sem, HelperCCCond(sem, CCCond::Zero));
+    return HelperConditinalJump(sem, GetCCCond(sem, CCCond::Zero));
 }
 
 // TODO: others...

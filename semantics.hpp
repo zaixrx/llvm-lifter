@@ -41,6 +41,7 @@ public:
     auto HandleXor(Semantics *sem) -> std::vector<Successor>;
 
     auto HandleJz(Semantics *sem) -> std::vector<Successor>;
+    auto HandleCmp(Semantics *sem) -> std::vector<Successor>;
 
     auto HandleJmp(Semantics *sem) -> std::vector<Successor>;
     auto HandleCall(Semantics *sem) -> std::vector<Successor>;
@@ -66,10 +67,11 @@ private:
         NotSign
     };
 
-    auto HelperUpdateFlags(Semantics* sem, llvm::Value *value) -> void; 
+    auto HelperWriteCommonFlags(Semantics* sem, llvm::Value *value) -> void; 
     auto HelperBinaryOP(Semantics* sem, llvm::Instruction::BinaryOps Opc, void(Semantics_x86::*helper)(Semantics*, llvm::Value*)) -> std::vector<Successor>;
     auto HelperConditinalJump(Semantics *sem, llvm::Value *cond) -> std::vector<Successor>;
-    auto HelperCCCond(Semantics *sem, CCCond cc);
+    auto GetCCCond(Semantics *sem, CCCond cc);
+    auto HelperWriteSubFlags(Semantics *sem, llvm::Value *value);
 
     llvm::Function *jumpHandler;
     llvm::Function *callHandler;
