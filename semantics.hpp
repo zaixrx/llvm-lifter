@@ -40,8 +40,12 @@ public:
     auto HandleOr(Semantics *sem) -> std::vector<Successor>;
     auto HandleXor(Semantics *sem) -> std::vector<Successor>;
 
-    auto HandleJz(Semantics *sem) -> std::vector<Successor>;
+    auto HandleAdd(Semantics *sem) -> std::vector<Successor>;
+    auto HandleSub(Semantics *sem) -> std::vector<Successor>;
+
     auto HandleCmp(Semantics *sem) -> std::vector<Successor>;
+    auto HandleJz(Semantics *sem) -> std::vector<Successor>;
+    auto HandleJnz(Semantics *sem) -> std::vector<Successor>;
 
     auto HandleJmp(Semantics *sem) -> std::vector<Successor>;
     auto HandleCall(Semantics *sem) -> std::vector<Successor>;
@@ -67,11 +71,18 @@ private:
         NotSign
     };
 
-    auto HelperWriteCommonFlags(Semantics* sem, llvm::Value *value) -> void; 
-    auto HelperBinaryOP(Semantics* sem, llvm::Instruction::BinaryOps Opc, void(Semantics_x86::*helper)(Semantics*, llvm::Value*)) -> std::vector<Successor>;
+    auto HelperLogicalOp(Semantics* sem, llvm::Instruction::BinaryOps Opc, void(Semantics_x86::*helper)(Semantics*, llvm::Value*)) -> std::vector<Successor>;
+    auto HelperArithmeticOp(Semantics* sem, llvm::Instruction::BinaryOps Opc, void(Semantics_x86::*helper)(Semantics*, llvm::Value *lhs, llvm::Value *rhs, llvm::Value *res)) -> std::vector<Successor>;
+
     auto HelperConditinalJump(Semantics *sem, llvm::Value *cond) -> std::vector<Successor>;
     auto GetCCCond(Semantics *sem, CCCond cc);
-    auto HelperWriteSubFlags(Semantics *sem, llvm::Value *value);
+
+    auto HelperWriteCommonFlags(Semantics* sem, llvm::Value *value) -> void; 
+    auto HelperWriteLogicalFlags(Semantics* sem, llvm::Value *value) -> void; 
+    auto HelperAddOverflow(Semantics *sem, llvm::Value *lhs, llvm::Value *rhs, llvm::Value *result) -> llvm::Value*;
+    auto HelperSubOverflow(Semantics *sem, llvm::Value *lhs, llvm::Value *rhs, llvm::Value *result) -> llvm::Value*;
+    auto HelperWriteAddFlags(Semantics *sem, llvm::Value *lhs, llvm::Value *rhs, llvm::Value *result) -> void;
+    auto HelperWriteSubFlags(Semantics *sem, llvm::Value *lhs, llvm::Value *rhs, llvm::Value *result) -> void;
 
     llvm::Function *jumpHandler;
     llvm::Function *callHandler;

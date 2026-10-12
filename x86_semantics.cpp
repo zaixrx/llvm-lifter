@@ -41,7 +41,25 @@ auto Semantics_x86::HandleMov(Semantics* sem) -> std::vector<Successor> {
     return {};
 }
 
-// arith
+// logical & arith
+auto Semantics_x86::HelperLogicalOp(Semantics* sem, llvm::Instruction::BinaryOps Opc, void(Semantics_x86::*helper)(Semantics*, llvm::Value*)) -> std::vector<Successor> {
+    auto lhs = sem->opRead(0);
+    auto rhs = sem->m_Builder.CreateZExtOrTrunc(sem->opRead(1), lhs->getType());
+    auto res = sem->m_Builder.CreateBinOp(Opc, lhs, rhs);
+    sem->opWrite(0, res);
+    (this->*helper)(sem, res);
+    return {};
+}
+
+auto Semantics_x86::HelperArithmeticOp(Semantics* sem, llvm::Instruction::BinaryOps Opc, void(Semantics_x86::*helper)(Semantics*, llvm::Value *lhs, llvm::Value *rhs, llvm::Value *res)) -> std::vector<Successor> {
+    auto lhs = sem->opRead(0);
+    auto rhs = sem->m_Builder.CreateZExtOrTrunc(sem->opRead(1), lhs->getType());
+    auto res = sem->m_Builder.CreateBinOp(Opc, lhs, rhs);
+    sem->opWrite(0, res);
+    (this->*helper)(sem, lhs, rhs, res);
+    return {};
+}
+
 auto Semantics_x86::HelperWriteCommonFlags(Semantics* sem, Value *value) -> void {
     auto resultIsZero = [&](Value *value) -> Value* {
         return sem->m_Builder.CreateICmpEQ(value, ConstantInt::get(value->getType(), 0));
@@ -65,41 +83,73 @@ auto Semantics_x86::HelperWriteCommonFlags(Semantics* sem, Value *value) -> void
     sem->flagWrite(Flag::PF, resultParityEven(value));
     sem->flagWrite(Flag::ZF, resultIsZero(value));
     sem->flagWrite(Flag::SF, resultSignBit(value));
-    sem->flagWrite(Flag::CF, sem->m_Builder.getInt1(false));
-    sem->flagWrite(Flag::OF, sem->m_Builder.getInt1(false));
     sem->flagWriteUndef(Flag::AF);
 }
 
-auto Semantics_x86::HelperBinaryOP(Semantics* sem, llvm::Instruction::BinaryOps Opc, void(Semantics_x86::*helper)(Semantics*, llvm::Value*)) -> std::vector<Successor> {
-    auto lhs = sem->opRead(0);
-    auto rhs = sem->m_Builder.CreateZExtOrTrunc(sem->opRead(1), lhs->getType());
-    auto res = sem->m_Builder.CreateBinOp(Opc, lhs, rhs);
-    sem->opWrite(0, res);
-    (this->*helper)(sem, res);
-    return {};
+auto Semantics_x86::HelperWriteLogicalFlags(Semantics *sem, Value *value) -> void {
+    HelperWriteCommonFlags(sem, value);
+    sem->flagWrite(Flag::CF, sem->m_Builder.getInt1(false));
+    sem->flagWrite(Flag::OF, sem->m_Builder.getInt1(false));
 }
 
-auto Semantics_x86::HelperWriteSubFlags(Semantics *sem, llvm::Value *value) {
+auto Semantics_x86::HelperAddOverflow(Semantics *sem, llvm::Value *lhs, llvm::Value *rhs, llvm::Value *result) -> llvm::Value* {
+    Value *sign_mask = ConstantInt::get(lhs->getType(), 1 << (lhs->getType()->getIntegerBitWidth() - 1));
+    Value *overflow_bits = sem->m_Builder.CreateAnd(sem->m_Builder.CreateXor(lhs, result), sem->m_Builder.CreateXor(rhs, result));
+    return sem->m_Builder.CreateICmpEQ(
+        sem->m_Builder.CreateAnd(overflow_bits, sign_mask),
+        ConstantInt::get(lhs->getType(), 1)
+    );
+}
+
+auto Semantics_x86::HelperSubOverflow(Semantics *sem, llvm::Value *lhs, llvm::Value *rhs, llvm::Value *result) -> llvm::Value* {
+    Value *sign_mask = ConstantInt::get(lhs->getType(), 1 << (lhs->getType()->getIntegerBitWidth() - 1));
+    Value *overflow_bits = sem->m_Builder.CreateAnd(sem->m_Builder.CreateXor(lhs, rhs), sem->m_Builder.CreateXor(lhs, result));
+    return sem->m_Builder.CreateICmpEQ(
+        sem->m_Builder.CreateAnd(overflow_bits, sign_mask),
+        ConstantInt::get(lhs->getType(), 1)
+    );
+}
+
+auto Semantics_x86::HelperWriteAddFlags(Semantics *sem, llvm::Value *lhs, llvm::Value *rhs, llvm::Value *result) -> void {
+    sem->flagWrite(Flag::CF, sem->m_Builder.CreateCmp(CmpInst::Predicate::ICMP_ULE, result, rhs));
+    sem->flagWrite(Flag::OF, HelperAddOverflow(sem, lhs, rhs, result));
+    HelperWriteCommonFlags(sem, result); // TODO: af has special handling here
+}
+
+auto Semantics_x86::HelperWriteSubFlags(Semantics *sem, llvm::Value *lhs, llvm::Value *rhs, llvm::Value *result) -> void {
+    sem->flagWrite(Flag::CF, sem->m_Builder.CreateCmp(CmpInst::Predicate::ICMP_ULE, lhs, rhs));
+    sem->flagWrite(Flag::OF, HelperSubOverflow(sem, lhs, rhs, result));
+    HelperWriteCommonFlags(sem, result); // TODO: af has special handling here
 }
 
 auto Semantics_x86::HandleAnd(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::And, &Semantics_x86::HelperWriteCommonFlags);
+    return HelperLogicalOp(sem, Instruction::BinaryOps::And, &Semantics_x86::HelperWriteCommonFlags);
 }
 
 auto Semantics_x86::HandleOr(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::Or, &Semantics_x86::HelperWriteCommonFlags);
+    return HelperLogicalOp(sem, Instruction::BinaryOps::Or, &Semantics_x86::HelperWriteCommonFlags);
 }
 
 auto Semantics_x86::HandleXor(Semantics *sem) -> std::vector<Successor> {
-    return HelperBinaryOP(sem, Instruction::BinaryOps::Xor, &Semantics_x86::HelperWriteCommonFlags);
+    return HelperLogicalOp(sem, Instruction::BinaryOps::Xor, &Semantics_x86::HelperWriteCommonFlags);
 }
 
 auto Semantics_x86::HandleCmp(Semantics *sem) -> std::vector<Successor> {
-    auto dst = sem->opRead(0);
-    auto src = sem->opRead(1);
-    src = sem->m_Builder.CreateZExtOrTrunc(src, dst->getType());
-    auto res = sem->m_Builder.CreateSub(dst, src);
-    HelperWriteSubFlags(sem, res);
+    auto lhs = sem->opRead(0);
+    auto rhs = sem->opRead(1);
+    rhs = sem->m_Builder.CreateZExtOrTrunc(rhs, lhs->getType());
+    auto res = sem->m_Builder.CreateSub(lhs, rhs);
+    HelperWriteSubFlags(sem, lhs, rhs, res);
+    return {};
+}
+
+auto Semantics_x86::HandleAdd(Semantics *sem) -> std::vector<Successor> {
+    HelperArithmeticOp(sem, llvm::Instruction::BinaryOps::Add, &Semantics_x86::HelperWriteAddFlags);
+    return {};
+}
+
+auto Semantics_x86::HandleSub(Semantics *sem) -> std::vector<Successor> {
+    HelperArithmeticOp(sem, llvm::Instruction::BinaryOps::Add, &Semantics_x86::HelperWriteSubFlags);
     return {};
 }
 
@@ -201,6 +251,10 @@ auto Semantics_x86::GetCCCond(Semantics *sem, CCCond cc) {
 
 auto Semantics_x86::HandleJz(Semantics *sem) -> std::vector<Successor> {
     return HelperConditinalJump(sem, GetCCCond(sem, CCCond::Zero));
+}
+
+auto Semantics_x86::HandleJnz(Semantics *sem) -> std::vector<Successor> {
+    return HelperConditinalJump(sem, GetCCCond(sem, CCCond::NotZero));
 }
 
 // TODO: others...
@@ -341,7 +395,12 @@ void Semantics::initializeMetadata() {
         {X86_INS_OR, &Semantics_x86::HandleOr},
         {X86_INS_XOR, &Semantics_x86::HandleXor},
 
+        {X86_INS_ADD, &Semantics_x86::HandleAdd},
+        {X86_INS_SUB, &Semantics_x86::HandleSub},
+
         {X86_INS_JE, &Semantics_x86::HandleJz},
+        {X86_INS_JNE, &Semantics_x86::HandleJnz},
+        {X86_INS_CMP, &Semantics_x86::HandleCmp},
 
         {X86_INS_JMP, &Semantics_x86::HandleJmp},
         {X86_INS_CALL, &Semantics_x86::HandleCall},
