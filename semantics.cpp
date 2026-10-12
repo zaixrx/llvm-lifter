@@ -1,4 +1,5 @@
 #include "semantics.hpp"
+#include "optimizer.hpp"
 
 #include <llvm/IR/Verifier.h>
 #include <llvm/IR/Constants.h>
@@ -254,7 +255,7 @@ auto Semantics::pop() -> Value* {
     return value;
 }
 
-auto Semantics::liftBytes(uintptr_t addr, std::span<std::uint8_t> code) -> std::vector<Successor> {
+auto Semantics::liftBytes(uintptr_t addr, std::span<std::uint8_t> code, bool optimizeLiftedFunction) -> std::vector<Successor> {
     if (!m_Function) {
         begin(addr);
     }
@@ -297,6 +298,10 @@ auto Semantics::liftBytes(uintptr_t addr, std::span<std::uint8_t> code) -> std::
 
     if (verifyModule(m_Module, &errs())) {
         throw std::runtime_error("Failed to verify module");
+    }
+
+    if (optimizeLiftedFunction) {
+        Optimizer(m_Function).run();
     }
 
     return succs;

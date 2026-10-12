@@ -5,7 +5,7 @@ find_package(LLVM REQUIRED CONFIG)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(CAPSTONE REQUIRED IMPORTED_TARGET capstone>=5)
 
-add_library(lifter semantics.cpp x86_semantics.cpp)
+add_library(lifter ./semantics.cpp ./x86_semantics.cpp ./optimizer.cpp)
 target_compile_features(lifter PUBLIC cxx_std_23)
 target_include_directories(lifter PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(lifter SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})

@@ -100,7 +100,7 @@ public:
     Semantics& operator=(const Semantics&) = delete;
 
     auto begin(uintptr_t addr) -> llvm::Function*;
-    std::vector<Successor> liftBytes(uintptr_t addr, std::span<std::uint8_t> code);
+    std::vector<Successor> liftBytes(uintptr_t addr, std::span<std::uint8_t> code, bool optimizeLiftedFunction = true);
 
 private:
     struct Register {
