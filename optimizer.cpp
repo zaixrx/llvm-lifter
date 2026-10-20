@@ -1,24 +1,38 @@
 #include "optimizer.hpp"
+#include "passes/StateRemoverPass.hpp"
+#include "passes/MemoryRemoverPass.hpp"
 
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/Analysis/LoopAnalysisManager.h>
 
-#include <algorithm>
+#include <llvm/IR/Module.h>
+#include <utility>
 
 Optimizer&& Optimizer::exhaustOptimizations(bool on) {
-    ExhaustOptimizations = on;
+    EnableExhaustOptimizations = on;
     return std::move(*this);
 }
 
-void Optimizer::run() const {
+Optimizer&& Optimizer::stateRemoverPass(bool on) {
+    EnableStateRemoverPass = on;
+    return std::move(*this);
+}
+
+Optimizer&& Optimizer::memoryRemoverPass(bool on) {
+    EnableMemoryRemoverPass = on;
+    return std::move(*this);
+}
+
+llvm::Function* Optimizer::run() {
     llvm::PassBuilder PB;
     llvm::LoopAnalysisManager LAM;
     llvm::CGSCCAnalysisManager CAM;
     llvm::ModuleAnalysisManager MAM;
     llvm::FunctionAnalysisManager FAM;
 
-    auto FPM = PB.buildFunctionSimplificationPipeline(llvm::OptimizationLevel::O3, llvm::ThinOrFullLTOPhase::ThinLTOPreLink);
+    const auto level = EnableExhaustOptimizations ? llvm::OptimizationLevel::O3 : llvm::OptimizationLevel::O1;
+    auto FPM = PB.buildFunctionSimplificationPipeline(level, llvm::ThinOrFullLTOPhase::ThinLTOPreLink);
 
     PB.registerLoopAnalyses(LAM);
     PB.registerCGSCCAnalyses(CAM);
@@ -26,5 +40,14 @@ void Optimizer::run() const {
     PB.registerFunctionAnalyses(FAM);
     PB.crossRegisterProxies(LAM, FAM, CAM, MAM);
 
-    FPM.run(*m_Function, FAM);
+    auto* module = m_Function->getParent();
+    const auto name = m_Function->getName().str();
+    llvm::ModulePassManager recovery;
+    if (EnableStateRemoverPass) recovery.addPass(StateRemoverPass(name));
+    if (EnableMemoryRemoverPass) recovery.addPass(MemoryRemoverPass(name));
+    recovery.run(*module, MAM);
+    auto* function = module->getFunction(name);
+    FPM.run(*function, FAM);
+    m_Function = function;
+    return function;
 }

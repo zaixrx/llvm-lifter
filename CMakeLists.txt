@@ -6,6 +6,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(CAPSTONE REQUIRED IMPORTED_TARGET capstone>=5)
 
 add_library(lifter ./semantics.cpp ./x86_semantics.cpp ./optimizer.cpp)
+add_subdirectory(passes)
 target_compile_features(lifter PUBLIC cxx_std_23)
 target_include_directories(lifter PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(lifter SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
@@ -14,9 +15,21 @@ target_compile_options(lifter PRIVATE ${LLVM_DEFINITION_FLAGS} -Wall -Wextra -Wp
 if(TARGET LLVM)
     set(LLVM_LIBS LLVM)
 else()
-    llvm_map_components_to_libnames(LLVM_LIBS Core Support)
+    llvm_map_components_to_libnames(LLVM_LIBS Core Support Analysis Passes TransformUtils InstCombine ScalarOpts IPO)
 endif()
 target_link_libraries(lifter PUBLIC ${LLVM_LIBS} PkgConfig::CAPSTONE)
 
 add_executable(llvm-lifter main.cpp)
 target_link_libraries(llvm-lifter PRIVATE lifter)
+
+include(CTest)
+if(BUILD_TESTING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    find_program(LIFTER_TEST_CLANG NAMES clang)
+    find_program(LIFTER_TEST_NASM NAMES nasm)
+    if(Python3_Interpreter_FOUND AND LIFTER_TEST_CLANG AND LIFTER_TEST_NASM)
+        add_test(NAME optimizer
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/optimizer.py
+                $<TARGET_FILE:llvm-lifter> ${LIFTER_TEST_CLANG} ${LIFTER_TEST_NASM})
+    endif()
+endif()

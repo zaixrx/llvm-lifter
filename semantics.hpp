@@ -2,6 +2,8 @@
 
 #include <capstone/capstone.h>
 #include <capstone/x86.h>
+#include <cstddef>
+#include <cstdint>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
 
@@ -24,8 +26,35 @@ struct InsnFini {
     void operator()(cs_insn* instruction) const noexcept { cs_free(instruction, 1); }
 };
 
+struct X86State {
+    std::uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp;
+    std::uint64_t r8, r9, r10, r11, r12, r13, r14, r15, rip, gs;
+    std::uint8_t cf, pf, af, zf, sf, of;
+};
+
 class Semantics_x86 {
 public:
+    enum Register : std::size_t {
+        RAX = offsetof(X86State, rax),
+        RBX = offsetof(X86State, rbx),
+        RCX = offsetof(X86State, rcx),
+        RDX = offsetof(X86State, rdx),
+        RSI = offsetof(X86State, rsi),
+        RDI = offsetof(X86State, rdi),
+        RBP = offsetof(X86State, rbp),
+        RSP = offsetof(X86State, rsp),
+        R8 = offsetof(X86State, r8),
+        R9 = offsetof(X86State, r9),
+        R10 = offsetof(X86State, r10),
+        R11 = offsetof(X86State, r11),
+        R12 = offsetof(X86State, r12),
+        R13 = offsetof(X86State, r13),
+        R14 = offsetof(X86State, r14),
+        R15 = offsetof(X86State, r15),
+        RIP = offsetof(X86State, rip),
+        GS = offsetof(X86State, gs)
+    };
+
     enum Flag {
         CF, PF, AF, ZF, SF, OF
     };
@@ -100,12 +129,12 @@ public:
     Semantics& operator=(const Semantics&) = delete;
 
     auto begin(uintptr_t addr) -> llvm::Function*;
-    std::vector<Successor> liftBytes(uintptr_t addr, std::span<std::uint8_t> code, bool optimizeLiftedFunction = true);
+    std::vector<Successor> liftBytes(uintptr_t addr, std::span<std::uint8_t> code, bool optimizeLiftedFunction = false);
 
 private:
     struct Register {
         std::string_view name;
-        unsigned index, size, offset;
+        size_t index, size, bitOffset;
     };
 
     void createTypes();
@@ -115,9 +144,9 @@ private:
 
     auto opRead(unsigned index) -> llvm::Value*;
     auto opWrite(unsigned index, llvm::Value*) -> void;
-    auto getOrCreateRegPointer(Register &reg) -> llvm::Value*;
-    auto regRead(Register &reg) -> llvm::Value*;
-    auto regWrite(Register &reg, llvm::Value* value) -> void;
+    auto getOrCreateRegPointer(const Register &reg) -> llvm::Value*;
+    auto regRead(const Register &reg) -> llvm::Value*;
+    auto regWrite(const Register &reg, llvm::Value* value) -> void;
     auto memAddress(const x86_op_mem& op) -> llvm::Value*;
     auto memRead(llvm::Value *addr, llvm::Type*) -> llvm::Value*;
     auto memWrite(llvm::Value *addr, llvm::Value* value) -> void;
@@ -136,10 +165,10 @@ private:
 
     // Local State
     llvm::Function* m_Function{};
+    std::unique_ptr<cs_insn, InsnFini> m_Insn;
     std::map<unsigned, llvm::Value*> m_FlagPtrs;
     std::map<unsigned, llvm::Value*> m_RegPtrs;
     std::map<std::uint64_t, llvm::BasicBlock*> m_Blocks;
-    std::unique_ptr<cs_insn, InsnFini> m_Insn;
 
     // Arch info
     Semantics_x86 _x86;

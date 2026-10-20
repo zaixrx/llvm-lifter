@@ -67,7 +67,7 @@ auto Semantics::getOrCreateBlock(std::uintptr_t addr) -> BasicBlock* {
     return block;
 }
 
-auto Semantics::getOrCreateRegPointer(Register &reg) -> Value* {
+auto Semantics::getOrCreateRegPointer(const Register &reg) -> Value* {
     if (m_RegPtrs.contains(reg.index)) {
         return m_RegPtrs[reg.index];
     }
@@ -77,11 +77,11 @@ auto Semantics::getOrCreateRegPointer(Register &reg) -> Value* {
     return pointer;
 }
 
-auto Semantics::regRead(Register &reg) -> Value* {
+auto Semantics::regRead(const Register &reg) -> Value* {
     Value* regPtr = getOrCreateRegPointer(reg);
     Value* value = m_Builder.CreateAlignedLoad(_i64Ty, regPtr, Align(8));
-    if (reg.offset) {
-        value = m_Builder.CreateLShr(value, m_Builder.getInt64(reg.offset));
+    if (reg.bitOffset) {
+        value = m_Builder.CreateLShr(value, m_Builder.getInt64(reg.bitOffset));
     }
     if (reg.size != 64) {
         value = m_Builder.CreateTrunc(value, m_Builder.getIntNTy(reg.size));
@@ -89,7 +89,7 @@ auto Semantics::regRead(Register &reg) -> Value* {
     return value;
 }
 
-auto Semantics::regWrite(Register &reg, Value* value) -> void {
+auto Semantics::regWrite(const Register &reg, Value* value) -> void {
     Value* pointer = getOrCreateRegPointer(reg);
     // Make same active number of bits as `reg`
     value = m_Builder.CreateZExtOrTrunc(value, m_Builder.getIntNTy(reg.size));
@@ -98,9 +98,9 @@ auto Semantics::regWrite(Register &reg, Value* value) -> void {
         value = m_Builder.CreateZExt(value, _i64Ty);
         if (reg.size != 32) {
             Value* old = m_Builder.CreateAlignedLoad(_i64Ty, pointer, Align(8));
-            const uint64_t inv_mask = ~(((uint64_t{1} << reg.size) - 1) << reg.offset);
+            const uint64_t inv_mask = ~(((uint64_t{1} << reg.size) - 1) << reg.bitOffset);
             old = m_Builder.CreateAnd(old, m_Builder.getInt64(inv_mask));
-            value = m_Builder.CreateShl(value, m_Builder.getInt64(reg.offset));
+            value = m_Builder.CreateShl(value, m_Builder.getInt64(reg.bitOffset));
             value = m_Builder.CreateOr(old, value);
         }
     }
@@ -209,10 +209,10 @@ auto Semantics::getOrCreateFlagPointer(Semantics_x86::Flag flag) -> Value* {
         return m_FlagPtrs[flag];
     }
     IRBuilder<> temp(m_Function->getEntryBlock().getTerminator());
-    Value* flags = temp.CreateStructGEP(m_StateTy, m_Function->getArg(0), 18);
-    Value* pointer = temp.CreateStructGEP(m_StateTy->getElementType(18), flags, unsigned{flag}, std::format("eflags_{}", unsigned{flag}));
-    m_FlagPtrs.emplace(flag, pointer);
-    return pointer;
+    const auto fieldIndex = offsetof(X86State, cf) / sizeof(std::uint64_t) + unsigned{flag};
+    Value* ptr = temp.CreateStructGEP(m_StateTy, m_Function->getArg(0), fieldIndex, std::format("eflags_{}", unsigned{flag}));
+    m_FlagPtrs.emplace(flag, ptr);
+    return ptr;
 }
 
 auto Semantics::flagRead(Semantics_x86::Flag flag) -> Value* {
@@ -241,14 +241,14 @@ auto Semantics::flagWriteUndef(Semantics_x86::Flag flag) -> void {
 }
 
 auto Semantics::push(Value* value) -> void {
-    auto& rsp = _regs.at(X86_REG_RSP);
+    auto rsp = _regs.at(X86_REG_RSP);
     auto* addr = m_Builder.CreateSub(regRead(rsp), m_Builder.getInt64(8));
     regWrite(rsp, addr);
     memWrite(addr, m_Builder.CreateZExtOrTrunc(value, _i64Ty));
 }
 
 auto Semantics::pop() -> Value* {
-    auto& rsp = _regs.at(X86_REG_RSP);
+    auto rsp = _regs.at(X86_REG_RSP);
     auto* addr = regRead(rsp);
     auto* value = memRead(addr, _i64Ty);
     regWrite(rsp, m_Builder.CreateAdd(addr, m_Builder.getInt64(8)));
@@ -324,16 +324,9 @@ void Semantics::createTypes() {
         return StructType::create(context, fields, name);
     };
 
-    std::vector<Type*> fields(18, _i64Ty); // 17 GPRs + GS
-    std::vector<Type*> flag_fields(6, _i8Ty);
-    auto* flags = namedStruct(m_Context, "Flags", flag_fields);
-    fields.insert(
-        fields.end(),
-        {
-            flags
-        }
-    );
-    m_StateTy = namedStruct(m_Context, "State", fields);
+    std::vector<Type*> state_fields(18, _i64Ty); // 17 GPRs + GS
+    state_fields.insert(state_fields.end(), 6, _i8Ty);
+    m_StateTy = namedStruct(m_Context, "State", state_fields);
 
     Type* pointerTy = PointerType::getUnqual(m_Context);
     m_LiftedTy = FunctionType::get(m_Builder.getVoidTy(), { pointerTy, pointerTy }, false);
