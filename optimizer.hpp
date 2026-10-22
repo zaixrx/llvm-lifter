@@ -15,7 +15,6 @@ public:
     Optimizer&& stateRemoverPass(bool on);
     Optimizer&& memoryRemoverPass(bool on);
 
-    // Signature recovery can replace the function. Use the returned pointer.
     llvm::Function* run();
 
 private:

@@ -30,9 +30,9 @@ llvm::Function* Optimizer::run() {
     llvm::CGSCCAnalysisManager CAM;
     llvm::ModuleAnalysisManager MAM;
     llvm::FunctionAnalysisManager FAM;
+    llvm::ModulePassManager recovery;
 
-    const auto level = EnableExhaustOptimizations ? llvm::OptimizationLevel::O3 : llvm::OptimizationLevel::O1;
-    auto FPM = PB.buildFunctionSimplificationPipeline(level, llvm::ThinOrFullLTOPhase::ThinLTOPreLink);
+    auto FPM = PB.buildFunctionSimplificationPipeline(llvm::OptimizationLevel::O3, llvm::ThinOrFullLTOPhase::ThinLTOPreLink);
 
     PB.registerLoopAnalyses(LAM);
     PB.registerCGSCCAnalyses(CAM);
@@ -40,14 +40,20 @@ llvm::Function* Optimizer::run() {
     PB.registerFunctionAnalyses(FAM);
     PB.crossRegisterProxies(LAM, FAM, CAM, MAM);
 
-    auto* module = m_Function->getParent();
+    llvm::Module* mod = m_Function->getParent();
     const auto name = m_Function->getName().str();
-    llvm::ModulePassManager recovery;
-    if (EnableStateRemoverPass) recovery.addPass(StateRemoverPass(name));
-    if (EnableMemoryRemoverPass) recovery.addPass(MemoryRemoverPass(name));
-    recovery.run(*module, MAM);
-    auto* function = module->getFunction(name);
+
+    if (EnableStateRemoverPass) {
+        recovery.addPass(StateRemoverPass(name));
+    }
+    if (EnableMemoryRemoverPass) {
+        recovery.addPass(MemoryRemoverPass(name)); 
+    }
+    recovery.run(*mod, MAM);
+
+    llvm::Function* function = mod->getFunction(name);
     FPM.run(*function, FAM);
     m_Function = function;
+
     return function;
 }

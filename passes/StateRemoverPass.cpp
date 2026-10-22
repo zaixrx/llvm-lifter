@@ -174,13 +174,20 @@ llvm::Function* recover(llvm::Function& function, llvm::FunctionAnalysisManager&
 
 } // namespace
 
-llvm::PreservedAnalyses StateRemoverPass::run(llvm::Module& module, llvm::ModuleAnalysisManager& analyses) {
-    auto& functions = analyses.getResult<llvm::FunctionAnalysisManagerModuleProxy>(module).getManager();
+llvm::PreservedAnalyses StateRemoverPass::run(llvm::Module& mod, llvm::ModuleAnalysisManager& analyses) {
     llvm::SmallVector<llvm::Function*> worklist;
-    for (auto& function : module) {
-        if (m_FunctionName.empty() || function.getName() == m_FunctionName) worklist.push_back(&function);
+
+    auto& functions = analyses.getResult<llvm::FunctionAnalysisManagerModuleProxy>(mod).getManager();
+    for (auto& function : mod) {
+        if (m_FunctionName == function.getName()) {
+            worklist.push_back(&function);
+        }
     }
+
     bool changed = false;
-    for (auto* function : worklist) changed |= recover(*function, functions) != nullptr;
+    for (auto* function : worklist) {
+        changed |= recover(*function, functions) != nullptr;
+    }
+
     return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
 }
